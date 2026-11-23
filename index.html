@@ -79,7 +79,20 @@ require([
   const $ = id => document.getElementById(id);
   const unitSel = $("unit"), featSel = $("feature"), featBtn = $("moveFeature"),
         place = $("place"), findBtn = $("find"), results = $("results"), statusEl = $("status");
-  let layer, oidField, units = [], features = [];
+let layer, oidField, units = [], features = [];
+
+  // Remember the sign-in for this browser tab so a reload does not ask again
+  const CRED_KEY = "moveUnitSignIn";
+  function saveCreds() {
+    try { sessionStorage.setItem(CRED_KEY, JSON.stringify(esriId.toJSON())); } catch (e) {}
+  }
+  try {
+    const saved = sessionStorage.getItem(CRED_KEY);
+    if (saved) esriId.initialize(JSON.parse(saved));
+  } catch (e) {}
+  window.addEventListener("pagehide", saveCreds);
+  document.addEventListener("visibilitychange", saveCreds);
+  setInterval(saveCreds, 10000);
 
   function say(msg, kind) { statusEl.textContent = msg; statusEl.className = kind || ""; }
 
