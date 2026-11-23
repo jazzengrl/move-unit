@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Move unit</title>
+<style>
+  :root { --ink:#1b2430; --muted:#5b6675; --line:#c9d1dc; --accent:#b3361b; --accent-ink:#fff; --ok:#1d6b3a; --bad:#a11d1d; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:14px; font:16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--ink); background:#fff; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  label { display:block; font-weight:600; margin:12px 0 4px; }
+  select, input { width:100%; padding:11px 10px; font:inherit; border:1.5px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); }
+  select:focus, input:focus, button:focus-visible { outline:3px solid #f1b04c; outline-offset:1px; }
+  .hint { color:var(--muted); font-size:14px; margin:4px 0 0; }
+  button { font:inherit; font-weight:600; cursor:pointer; border-radius:6px; }
+  #find { width:100%; margin-top:14px; padding:12px; border:0; background:var(--accent); color:var(--accent-ink); }
+  #find:disabled { opacity:.5; cursor:default; }
+  #results { list-style:none; margin:14px 0 0; padding:0; }
+  #results li { margin:0 0 8px; }
+  #results button { width:100%; text-align:left; padding:11px 12px; border:1.5px solid var(--line); background:#fff; color:var(--ink); font-weight:500; }
+  #results button:hover { border-color:var(--accent); }
+  #results .lead { font-weight:600; }
+  #status { margin-top:14px; min-height:1.4em; font-weight:600; }
+  #status.ok { color:var(--ok); } #status.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<h1>Move unit</h1>
+
+<label for="unit">Unit</label>
+<select id="unit" disabled><option>Loading units…</option></select>
+
+<label for="place">New location</label>
+<input id="place" type="text" autocomplete="off" placeholder="18th St &amp; Irvine Ave, Clearlake CA" disabled>
+<p class="hint">Street address, cross streets with the city, or latitude, longitude.</p>
+
+<button id="find" disabled>Find location</button>
+<ul id="results"></ul>
+<div id="status" role="status" aria-live="polite"></div>
+
+<script src="https://js.arcgis.com/4.31/"></script>
+<script>
+/* ===== EDIT THESE ===== */
+const CONFIG = {
+  // REST URL of your hosted feature layer, ending in /FeatureServer/0 (or the layer number)
+  layerUrl: "https://services8.arcgis.com/im2wMQ93z5AFliYf/arcgis/rest/services/MEDICAL_RESOURCES/FeatureServer/0",
+  // Field holding each unit's name (what shows in the dropdown)
+  nameField: "ResourceID",
+  // Date field to stamp with the time of each move. Set to null to skip.
+  lastUpdatedField: "null",
+  // Optional [longitude, latitude] near the incident. Ranks nearby matches first.
+  searchCenter: null,
+  // Optional: limit the dropdown to some units, e.g. "UnitType = 'AMB'". Use "1=1" for all.
+  unitFilter: "1=1"
+};
+const GEOCODER = "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer";
+/* ====================== */
+
+require([
+  "esri/layers/FeatureLayer", "esri/rest/locator", "esri/geometry/Point",
+  "esri/geometry/support/webMercatorUtils", "esri/Graphic"
+], function (FeatureLayer, locator, Point, webMercatorUtils, Graphic) {
+
+  const $ = id => document.getElementById(id);
+  const unitSel = $("unit"), place = $("place"), findBtn = $("find"),
+        results = $("results"), statusEl = $("status");
+  let layer, oidField, units = [];
+
+  function say(msg, kind) { statusEl.textContent = msg; statusEl.className = kind || ""; }
+
+  async function init() {
+    try {
+      layer = new FeatureLayer({ url: CONFIG.layerUrl });
+      await layer.load();               // prompts for sign-in if the layer is private
+      oidField = layer.objectIdField;
+      if (!layer.capabilities.operations.supportsUpdate) {
+        say("This layer does not allow editing. Turn on editing in the layer settings.", "bad"); return;
+      }
+      await loadUnits();
+      unitSel.disabled = place.disabled = findBtn.disabled = false;
+      say("");
+    } catch (e) { say("Could not open the layer: " + (e.message || e), "bad"); }
+  }
+
+  async function loadUnits() {
+    const r = await layer.queryFeatures({
+      where: CONFIG.unitFilter, outFields: [oidField, CONFIG.nameField],
+      returnGeometry: false, orderByFields: [CONFIG.nameField]
+    });
+    units = r.features.map(f => ({ oid: f.attributes[oidField], name: f.attributes[CONFIG.nameField] }));
+    unitSel.innerHTML = "";
+    units.forEach((u, i) => unitSel.add(new Option(u.name, i)));
+    if (!units.length) say("No units found. Check unitFilter and nameField in the page settings.", "bad");
+  }
+
+  // Latitude, longitude typed directly, e.g. "38.9582, -122.6264"
+  function parseLatLon(text) {
+    const m = text.trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
+    if (!m) return null;
+    let a = parseFloat(m[1]), b = parseFloat(m[2]);
+    if (Math.abs(a) > 90) [a, b] = [b, a];          // accept lon, lat order too
+    if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+    return { lat: a, lon: b };
+  }
+
+  async function find() {
+    results.innerHTML = ""; say("");
+    const text = place.value.trim();
+    if (!text) { say("Type a location first.", "bad"); return; }
+    findBtn.disabled = true; say("Searching…");
+    try {
+      let matches;
+      const ll = parseLatLon(text);
+      if (ll) {
+        matches = [{ label: ll.lat.toFixed(5) + ", " + ll.lon.toFixed(5), lon: ll.lon, lat: ll.lat }];
+      } else {
+        const params = { address: { SingleLine: text }, maxLocations: 5, countryCode: "USA", forStorage: true };
+        if (CONFIG.searchCenter) params.location = new Point({ longitude: CONFIG.searchCenter[0], latitude: CONFIG.searchCenter[1] });
+        const c = await locator.addressToLocations(GEOCODER, params);
+        matches = c.map(x => ({ label: x.address, lon: x.location.longitude, lat: x.location.latitude, score: x.score }));
+      }
+      if (!matches.length) { say("No match. Add the city and state, or try cross streets.", "bad"); return; }
+      say("Tap the correct location to move " + unitSel.selectedOptions[0].text + ".");
+      matches.forEach(m => {
+        const li = document.createElement("li"), b = document.createElement("button");
+        b.type = "button"; b.textContent = m.label; b.onclick = () => move(m);
+        li.appendChild(b); results.appendChild(li);
+      });
+    } catch (e) { say("Search failed: " + (e.message || e), "bad"); }
+    finally { findBtn.disabled = false; }
+  }
+
+  async function move(m) {
+    const u = units[unitSel.value];
+    const sr = layer.spatialReference;
+    let geom = new Point({ longitude: m.lon, latitude: m.lat, spatialReference: { wkid: 4326 } });
+    if (sr.isWebMercator) geom = webMercatorUtils.geographicToWebMercator(geom);
+    else if (!sr.isWGS84) { say("Layer uses a coordinate system this page does not support.", "bad"); return; }
+
+    const attributes = { [oidField]: u.oid };
+    if (CONFIG.lastUpdatedField) attributes[CONFIG.lastUpdatedField] = Date.now();
+    say("Moving " + u.name + "…");
+    try {
+      const res = await layer.applyEdits({ updateFeatures: [new Graphic({ geometry: geom, attributes })] });
+      const err = res.updateFeatureResults[0] && res.updateFeatureResults[0].error;
+      if (err) throw new Error(err.message);
+      const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      say(u.name + " moved to " + m.label + " at " + t + ".", "ok");
+      results.innerHTML = ""; place.value = ""; place.focus();
+    } catch (e) { say("Move failed: " + (e.message || e), "bad"); }
+  }
+
+  findBtn.addEventListener("click", find);
+  place.addEventListener("keydown", e => { if (e.key === "Enter") find(); });
+  init();
+});
+</script>
+</body>
+</html>
